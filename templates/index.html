@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebProxy Terminal</title>
+    <style>
+        :root {
+            --bg: #080b10; --surface: #0e1420; --border: #1c2438;
+            --accent: #00e5ff; --accent2: #7b61ff; --text: #cdd6f4; --muted: #4a5568;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg); color: var(--text); font-family: system-ui, sans-serif;
+            min-height: 100vh; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 2rem; overflow: hidden;
+        }
+        body::before {
+            content: ''; position: fixed; inset: 0;
+            background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
+            background-size: 44px 44px; z-index: 0; opacity: 0.4;
+        }
+        .card { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 2rem; width: min(600px, 92vw); }
+        .logo-title { font-size: 2.5rem; font-weight: 800; text-align: center; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .search-bar { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+        .scheme-badge { display: flex; align-items: center; padding: 0 1rem; font-size: 0.85rem; color: var(--accent); border-right: 1px solid var(--border); background: rgba(0,0,0,0.2); }
+        input#url { flex: 1; background: transparent; border: none; padding: 1rem; font-size: 1rem; color: var(--text); outline: none; }
+        .go-btn { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #080b10; border: none; padding: 0 1.5rem; font-weight: 700; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo-title">WebProxy</div>
+        <div class="search-bar">
+            <div class="scheme-badge">secure://</div>
+            <input id="url" type="text" placeholder="enter domain target (e.g. wikipedia.org)" autofocus onkeydown="if(event.key==='Enter') go()">
+            <button class="go-btn" onclick="go()">LAUNCH</button>
+        </div>
+    </div>
+    <script>
+        function go() {
+            let input = document.getElementById('url').value.trim();
+            if (!input) return;
+            // Clear any user-typed http/https headers to normalize the input
+            input = input.replace(/^https?:\/\//i, '');
+            const target = 'https://' + input;
+            window.location.href = '/proxy?url=' + encodeURIComponent(target);
+        }
+    </script>
+</body>
+</html>
