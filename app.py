@@ -60,4 +60,6 @@ def proxy():
         return f"<div style='color:#ff5555; font-family:sans-serif; padding:30px;'><h2>Proxy Timeout Error</h2><p>{str(e)}</p></div>", 504
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import os
+    port = int(os.environ.get('PORT', 8888))
+    app.run(host='0.0.0.0', port=port, debug=False)
