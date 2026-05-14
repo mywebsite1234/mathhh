@@ -236,8 +236,7 @@ def proxy():
     if not target_url:
         return render_template_string(HOMEPAGE)
 
-    # Only allow http (not https tunnelling — this is a fetching proxy)
-    if not target_url.startswith('http://'):
+    if not target_url.startswith('http://') and not target_url.startswith('https://'):
         target_url = 'http://' + target_url
 
     try:
@@ -252,46 +251,87 @@ def proxy():
         # For HTML responses, rewrite links so they go through our proxy
         if 'text/html' in content_type:
             html = resp.text
-            parsed = urlparse(target_url)
-            base = f"{parsed.scheme}://{parsed.netloc}"
+            # Use the final URL after redirects as the base
+            final_url = resp.url
+            parsed = urlparse(final_url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            # Base for relative paths (everything up to the last slash)
+            path_parts = parsed.path.rsplit('/', 1)
+            base_path = origin + path_parts[0] + '/' if len(path_parts) > 1 else origin + '/'
 
-            # Rewrite absolute links:  href="http://..." → href="/proxy?url=http://..."
-            html = re.sub(
-                r'(href|src|action)=["\']((https?://)[^"\']+)["\']',
-                lambda m: f'{m.group(1)}="/proxy?url={quote(m.group(2), safe="")}"',
-                html
+            def proxify(url):
+                """Convert any URL into a /proxy?url=... link."""
+                url = url.strip()
+                if (not url or url.startswith('data:') or url.startswith('#')
+                        or url.startswith('javascript:') or url.startswith('mailto:')):
+                    return url
+                # Already proxied — don't double-wrap
+                if '/proxy?url=' in url:
+                    return url
+                # Absolute URL
+                if url.startswith('http://') or url.startswith('https://'):
+                    return '/proxy?url=' + quote(url, safe='')
+                # Protocol-relative  //example.com/path
+                if url.startswith('//'):
+                    return '/proxy?url=' + quote(parsed.scheme + ':' + url, safe='')
+                # Root-relative  /path
+                if url.startswith('/'):
+                    return '/proxy?url=' + quote(origin + url, safe='')
+                # Relative path
+                return '/proxy?url=' + quote(base_path + url, safe='')
+
+            # Rewrite href/src/action attributes (handles both single and double quotes)
+            def replace_attr(m):
+                attr, q, url = m.group(1), m.group(2), m.group(3)
+                return f'{attr}={q}{proxify(url)}{q}'
+
+            html = re.sub(r'(href|src|action)=(["\'])([^"\']*)\2', replace_attr, html)
+
+            # Rewrite srcset attributes (comma-separated list of "url size" pairs)
+            def replace_srcset(m):
+                q = m.group(1)
+                parts = m.group(2).split(',')
+                new_parts = []
+                for part in parts:
+                    pieces = part.strip().split()
+                    if pieces:
+                        pieces[0] = proxify(pieces[0])
+                    new_parts.append(' '.join(pieces))
+                return f'srcset={q}{", ".join(new_parts)}{q}'
+            html = re.sub(r'srcset=(["\'])([^"\']*)\1', replace_srcset, html)
+
+            # Rewrite url() in inline styles
+            def replace_css_url(m):
+                inner = m.group(1).strip().strip('\'"')
+                return 'url(' + proxify(inner) + ')'
+            html = re.sub(r'url\(([^)]+)\)', replace_css_url, html)
+
+            # Inject toolbar
+            toolbar = (
+                '<div id="__wproxy" style="'
+                'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
+                'background:#080b10cc;backdrop-filter:blur(8px);'
+                'border-bottom:1px solid #1c2438;'
+                'padding:5px 14px;display:flex;align-items:center;gap:10px;'
+                'font-family:monospace;font-size:12px;color:#cdd6f4;'
+                'box-shadow:0 2px 16px #0008;">'
+                '<a href="/" style="color:#00e5ff;text-decoration:none;font-weight:bold;flex-shrink:0">WebProxy</a>'
+                '<span style="color:#2e3348;flex-shrink:0">›</span>'
+                f'<span style="color:#7b61ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{final_url}</span>'
+                '<a href="/" style="color:#4a5568;text-decoration:none;flex-shrink:0">✕</a>'
+                '</div>'
+                '<div style="height:32px"></div>'
             )
-            # Rewrite root-relative links:  href="/path" → href="/proxy?url=http://base/path"
-            html = re.sub(
-                r'(href|src|action)=["\'](/[^"\']*)["\']',
-                lambda m: f'{m.group(1)}="/proxy?url={quote(base + m.group(2), safe="")}"',
-                html
-            )
 
-            # Inject a small toolbar at the top so you always know where you are
-            toolbar = f"""<div style="
-              position:fixed;top:0;left:0;right:0;z-index:999999;
-              background:#080b10;border-bottom:1px solid #1c2438;
-              padding:6px 14px;display:flex;align-items:center;gap:10px;
-              font-family:monospace;font-size:13px;color:#cdd6f4;">
-              <a href="/" style="color:#00e5ff;text-decoration:none;font-weight:bold;">WebProxy</a>
-              <span style="color:#4a5568;">›</span>
-              <span style="color:#7b61ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{target_url}</span>
-              <a href="/" style="color:#4a5568;text-decoration:none;font-size:11px;">✕ exit</a>
-            </div>
-            <div style="height:36px"></div>"""
-
-            # Insert toolbar after <body> tag if present, else prepend
-            if '<body' in html:
-                html = re.sub(r'(<body[^>]*>)', r'\1' + toolbar, html, count=1)
+            if re.search(r'<body', html, re.IGNORECASE):
+                html = re.sub(r'(<body[^>]*>)', r'\1' + toolbar, html, count=1, flags=re.IGNORECASE)
             else:
                 html = toolbar + html
 
             return Response(html, status=resp.status_code, content_type=content_type)
 
-        # For non-HTML (images, CSS, JS, etc.) pass through directly
-        return Response(resp.content, status=resp.status_code,
-                        content_type=content_type)
+        # For non-HTML (images, CSS, JS, fonts, etc.) pass through directly
+        return Response(resp.content, status=resp.status_code, content_type=content_type)
 
     except requests.exceptions.ConnectionError:
         return Response(f"<h2>Could not connect to {target_url}</h2>", status=502, content_type='text/html')
