@@ -248,46 +248,48 @@ def proxy():
         resp = requests.get(target_url, headers=headers, timeout=15, allow_redirects=True)
         content_type = resp.headers.get('Content-Type', 'text/html')
 
-        # For HTML responses, rewrite links so they go through our proxy
+        # Use the final URL after redirects as the base
+        final_url = resp.url
+        parsed = urlparse(final_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        path_parts = parsed.path.rsplit('/', 1)
+        base_path = origin + path_parts[0] + '/' if len(path_parts) > 1 else origin + '/'
+
+        def proxify(url):
+            """Convert any URL into a /proxy?url=... link."""
+            url = url.strip()
+            if (not url or url.startswith('data:') or url.startswith('#')
+                    or url.startswith('javascript:') or url.startswith('mailto:')):
+                return url
+            if '/proxy?url=' in url:
+                return url
+            if url.startswith('http://') or url.startswith('https://'):
+                return '/proxy?url=' + quote(url, safe='')
+            if url.startswith('//'):
+                return '/proxy?url=' + quote(parsed.scheme + ':' + url, safe='')
+            if url.startswith('/'):
+                return '/proxy?url=' + quote(origin + url, safe='')
+            return '/proxy?url=' + quote(base_path + url, safe='')
+
+        # ── Rewrite CSS: url() references ──────────────────────────
+        if 'text/css' in content_type:
+            css = resp.text
+            def replace_css_url(m):
+                inner = m.group(1).strip().strip('\'"')
+                return 'url(' + proxify(inner) + ')'
+            css = re.sub(r'url\(([^)]+)\)', replace_css_url, css)
+            return Response(css, status=resp.status_code, content_type=content_type)
+
+        # ── Rewrite HTML ────────────────────────────────────────────
         if 'text/html' in content_type:
             html = resp.text
-            # Use the final URL after redirects as the base
-            final_url = resp.url
-            parsed = urlparse(final_url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            # Base for relative paths (everything up to the last slash)
-            path_parts = parsed.path.rsplit('/', 1)
-            base_path = origin + path_parts[0] + '/' if len(path_parts) > 1 else origin + '/'
 
-            def proxify(url):
-                """Convert any URL into a /proxy?url=... link."""
-                url = url.strip()
-                if (not url or url.startswith('data:') or url.startswith('#')
-                        or url.startswith('javascript:') or url.startswith('mailto:')):
-                    return url
-                # Already proxied — don't double-wrap
-                if '/proxy?url=' in url:
-                    return url
-                # Absolute URL
-                if url.startswith('http://') or url.startswith('https://'):
-                    return '/proxy?url=' + quote(url, safe='')
-                # Protocol-relative  //example.com/path
-                if url.startswith('//'):
-                    return '/proxy?url=' + quote(parsed.scheme + ':' + url, safe='')
-                # Root-relative  /path
-                if url.startswith('/'):
-                    return '/proxy?url=' + quote(origin + url, safe='')
-                # Relative path
-                return '/proxy?url=' + quote(base_path + url, safe='')
-
-            # Rewrite href/src/action attributes (handles both single and double quotes)
             def replace_attr(m):
                 attr, q, url = m.group(1), m.group(2), m.group(3)
                 return f'{attr}={q}{proxify(url)}{q}'
 
             html = re.sub(r'(href|src|action)=(["\'])([^"\']*)\2', replace_attr, html)
 
-            # Rewrite srcset attributes (comma-separated list of "url size" pairs)
             def replace_srcset(m):
                 q = m.group(1)
                 parts = m.group(2).split(',')
@@ -300,13 +302,30 @@ def proxy():
                 return f'srcset={q}{", ".join(new_parts)}{q}'
             html = re.sub(r'srcset=(["\'])([^"\']*)\1', replace_srcset, html)
 
-            # Rewrite url() in inline styles
-            def replace_css_url(m):
+            def replace_inline_css_url(m):
                 inner = m.group(1).strip().strip('\'"')
                 return 'url(' + proxify(inner) + ')'
-            html = re.sub(r'url\(([^)]+)\)', replace_css_url, html)
+            html = re.sub(r'url\(([^)]+)\)', replace_inline_css_url, html)
 
-            # Inject toolbar
+            # Block location-based redirects that kick you back to the real site
+            anti_redirect = (
+                '<script>'
+                'var __realLoc = window.location;'
+                'Object.defineProperty(window, "location", {'
+                '  get: function() { return __realLoc; },'
+                '  set: function(v) {'
+                '    var s = String(v);'
+                '    if (s.startsWith("http") && !s.includes(window.__proxyHost||location.host)) {'
+                '      window.location.href = "/proxy?url=" + encodeURIComponent(s);'
+                '      return;'
+                '    }'
+                '    __realLoc.href = s;'
+                '  }'
+                '});'
+                'window.__proxyHost = location.host;'
+                '</script>'
+            )
+
             toolbar = (
                 '<div id="__wproxy" style="'
                 'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
@@ -323,14 +342,16 @@ def proxy():
                 '<div style="height:32px"></div>'
             )
 
+            inject = anti_redirect + toolbar
+
             if re.search(r'<body', html, re.IGNORECASE):
-                html = re.sub(r'(<body[^>]*>)', r'\1' + toolbar, html, count=1, flags=re.IGNORECASE)
+                html = re.sub(r'(<body[^>]*>)', r'\1' + inject, html, count=1, flags=re.IGNORECASE)
             else:
-                html = toolbar + html
+                html = inject + html
 
             return Response(html, status=resp.status_code, content_type=content_type)
 
-        # For non-HTML (images, CSS, JS, fonts, etc.) pass through directly
+        # For everything else (images, fonts, JS, etc.) pass through directly
         return Response(resp.content, status=resp.status_code, content_type=content_type)
 
     except requests.exceptions.ConnectionError:
