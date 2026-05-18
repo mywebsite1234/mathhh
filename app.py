@@ -336,17 +336,52 @@ def proxy():
                 '    return _open.apply(this,args);'
                 '  };'
 
-                # Intercept window.location assignments
+                # Intercept window.location assignments — use /download for files
                 '  var _loc=window.location;'
+                '  function isFileUrl(s){'
+                '    return /\\.(?:nbt|zip|jar|gz|tar|rar|7z|png|jpg|pdf|exe|msi|dmg)(\\?|$)/i.test(s);'
+                '  }'
                 '  Object.defineProperty(window,"location",{'
                 '    get:function(){return _loc;},'
                 '    set:function(v){'
                 '      var s=String(v);'
                 '      if(s.startsWith("http")&&!s.includes(_host)){'
-                '        _loc.href="/proxy?url="+encodeURIComponent(s);'
+                '        if(isFileUrl(s)){'
+                '          var a=document.createElement("a");'
+                '          a.href="/download?url="+encodeURIComponent(s);'
+                '          a.download="";'
+                '          document.body.appendChild(a);'
+                '          a.click();'
+                '          document.body.removeChild(a);'
+                '        } else {'
+                '          _loc.href="/proxy?url="+encodeURIComponent(s);'
+                '        }'
                 '      } else { _loc.href=s; }'
                 '    }'
                 '  });'
+                # Also patch location.href directly
+                '  try{'
+                '    var _locProto=Object.getPrototypeOf(_loc);'
+                '    var _origHrefSet=Object.getOwnPropertyDescriptor(_locProto,"href").set;'
+                '    Object.defineProperty(_locProto,"href",{'
+                '      get:function(){return _loc.href;},'
+                '      set:function(v){'
+                '        var s=String(v);'
+                '        if(s.startsWith("http")&&!s.includes(_host)){'
+                '          if(isFileUrl(s)){'
+                '            var a=document.createElement("a");'
+                '            a.href="/download?url="+encodeURIComponent(s);'
+                '            a.download="";'
+                '            document.body.appendChild(a);'
+                '            a.click();'
+                '            document.body.removeChild(a);'
+                '          } else {'
+                '            _origHrefSet.call(this,"/proxy?url="+encodeURIComponent(s));'
+                '          }'
+                '        } else { _origHrefSet.call(this,s); }'
+                '      }'
+                '    });'
+                '  }catch(e){}'
 
                 # Make download links work: intercept clicks on <a download> tags
                 '  document.addEventListener("click",function(e){'
@@ -402,6 +437,51 @@ def proxy():
         return Response(f"<h2>Request timed out for {target_url}</h2>", status=504, content_type='text/html')
     except Exception as e:
         return Response(f"<h2>Proxy error: {e}</h2>", status=500, content_type='text/html')
+
+
+# ── Download route — streams a file from a proxied URL ──────────
+@app.route('/download')
+def download():
+    from flask import stream_with_context
+    import urllib.parse
+
+    target_url = request.args.get('url', '').strip()
+    if not target_url:
+        return Response('No URL provided', status=400)
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        }
+        resp = requests.get(target_url, headers=headers, stream=True, timeout=30, allow_redirects=True)
+
+        # Try to get a filename from Content-Disposition or the URL
+        filename = ''
+        cd = resp.headers.get('Content-Disposition', '')
+        if 'filename=' in cd:
+            filename = cd.split('filename=')[-1].strip().strip('"\'')
+        if not filename:
+            filename = urllib.parse.unquote(target_url.split('/')[-1].split('?')[0]) or 'download'
+
+        content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+
+        def generate():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        response = Response(
+            stream_with_context(generate()),
+            status=resp.status_code,
+            content_type=content_type,
+        )
+        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        if 'Content-Length' in resp.headers:
+            response.headers['Content-Length'] = resp.headers['Content-Length']
+        return response
+
+    except Exception as e:
+        return Response(f'Download error: {e}', status=500)
 
 
 # ── Homepage ────────────────────────────────────────────────────
