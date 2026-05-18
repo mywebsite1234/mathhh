@@ -484,7 +484,81 @@ def download():
         return Response(f'Download error: {e}', status=500)
 
 
-# ── Homepage ────────────────────────────────────────────────────
+# ── Catch-all: forward unrecognised paths to createmod (or any site)
+# This handles cases where JS does location.href = "/download/..." (root-relative)
+# and our interceptor misses it because it doesn't start with "http"
+@app.route('/<path:subpath>', methods=['GET', 'POST', 'HEAD'])
+def catchall(subpath):
+    # If there's a Referer header from our proxy, forward the request to the real origin
+    referer = request.headers.get('Referer', '')
+    origin_url = None
+
+    # Extract the proxied origin from the Referer  e.g. /proxy?url=https://createmod.com/...
+    import urllib.parse as up
+    if 'proxy?url=' in referer:
+        try:
+            ref_path = up.urlparse(referer).query
+            params = up.parse_qs(ref_path)
+            proxied = params.get('url', [None])[0]
+            if proxied:
+                p = up.urlparse(proxied)
+                origin_url = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            pass
+
+    if not origin_url:
+        # fallback: check query param
+        origin_url = request.args.get('origin', '').strip()
+
+    if not origin_url:
+        return Response('Not Found', status=404)
+
+    # Build the full target URL
+    qs = request.query_string.decode()
+    target = f"{origin_url}/{subpath}" + (f"?{qs}" if qs else "")
+
+    # Decide: is this a file download or a page?
+    file_exts = ('.nbt', '.zip', '.jar', '.gz', '.tar', '.rar', '.7z',
+                 '.png', '.jpg', '.pdf', '.exe', '.msi', '.dmg', '.schematic')
+    path_lower = subpath.lower().split('?')[0]
+    is_file = any(path_lower.endswith(ext) for ext in file_exts)
+
+    # Also treat /download/... paths as files
+    if subpath.startswith('download/') or subpath == 'download':
+        is_file = True
+
+    if is_file:
+        # Stream it as a file download
+        from flask import stream_with_context
+        import urllib.parse
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 Chrome/120'}
+            r = requests.get(target, headers=headers, stream=True, timeout=30, allow_redirects=True)
+            filename = subpath.split('/')[-1].split('?')[0] or 'download'
+            cd = r.headers.get('Content-Disposition', '')
+            if 'filename=' in cd:
+                filename = cd.split('filename=')[-1].strip().strip('"\'')
+            ct = r.headers.get('Content-Type', 'application/octet-stream')
+
+            def gen():
+                for chunk in r.iter_content(8192):
+                    if chunk:
+                        yield chunk
+
+            resp = Response(stream_with_context(gen()), status=r.status_code, content_type=ct)
+            resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+            if 'Content-Length' in r.headers:
+                resp.headers['Content-Length'] = r.headers['Content-Length']
+            return resp
+        except Exception as e:
+            return Response(f'Download error: {e}', status=500)
+    else:
+        # Proxy it as a normal page
+        from flask import redirect
+        return redirect(f'/proxy?url={up.quote(target, safe="")}')
+
+
+
 @app.route('/')
 def index():
     return render_template_string(HOMEPAGE)
