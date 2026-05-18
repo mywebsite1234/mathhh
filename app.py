@@ -1,12 +1,3 @@
-"""
-Web Proxy - Flask app for Railway deployment
----------------------------------------------
-Visit:  https://yourapp.railway.app/
-Type a URL in the box → the server fetches it and returns it through Railway.
-
-No browser proxy settings needed.
-"""
-
 from flask import Flask, request, Response, render_template_string
 import requests
 from urllib.parse import urljoin, urlparse, urlencode, quote
@@ -307,22 +298,73 @@ def proxy():
                 return 'url(' + proxify(inner) + ')'
             html = re.sub(r'url\(([^)]+)\)', replace_inline_css_url, html)
 
-            # Block location-based redirects that kick you back to the real site
+            # Intercept fetch, XHR, and location so everything routes through proxy
             anti_redirect = (
                 '<script>'
-                'var __realLoc = window.location;'
-                'Object.defineProperty(window, "location", {'
-                '  get: function() { return __realLoc; },'
-                '  set: function(v) {'
-                '    var s = String(v);'
-                '    if (s.startsWith("http") && !s.includes(window.__proxyHost||location.host)) {'
-                '      window.location.href = "/proxy?url=" + encodeURIComponent(s);'
-                '      return;'
-                '    }'
-                '    __realLoc.href = s;'
+                '(function(){'
+                '  var _host = location.host;'
+                '  var _origin = ' + repr(origin) + ';'
+
+                # Rewrite any URL to go through proxy
+                '  function pw(u){'
+                '    if(!u||u.startsWith("data:")||u.startsWith("blob:")||u.startsWith("#")) return u;'
+                '    if(u.startsWith("/proxy?url=")) return u;'
+                '    try{'
+                '      var abs;'
+                '      if(u.startsWith("http")||u.startsWith("//")){abs=u.replace(/^\\/\\//,"https://");}'
+                '      else if(u.startsWith("/")) abs=_origin+u;'
+                '      else abs=_origin+"/"+u;'
+                '      return "/proxy?url="+encodeURIComponent(abs);'
+                '    }catch(e){return u;}'
                 '  }'
-                '});'
-                'window.__proxyHost = location.host;'
+
+                # Intercept fetch
+                '  var _fetch=window.fetch;'
+                '  window.fetch=function(input,init){'
+                '    if(typeof input==="string") input=pw(input);'
+                '    else if(input instanceof Request){'
+                '      input=new Request(pw(input.url),input);'
+                '    }'
+                '    return _fetch.call(this,input,init);'
+                '  };'
+
+                # Intercept XMLHttpRequest
+                '  var _open=XMLHttpRequest.prototype.open;'
+                '  XMLHttpRequest.prototype.open=function(m,u){'
+                '    var args=Array.from(arguments);'
+                '    args[1]=pw(u);'
+                '    return _open.apply(this,args);'
+                '  };'
+
+                # Intercept window.location assignments
+                '  var _loc=window.location;'
+                '  Object.defineProperty(window,"location",{'
+                '    get:function(){return _loc;},'
+                '    set:function(v){'
+                '      var s=String(v);'
+                '      if(s.startsWith("http")&&!s.includes(_host)){'
+                '        _loc.href="/proxy?url="+encodeURIComponent(s);'
+                '      } else { _loc.href=s; }'
+                '    }'
+                '  });'
+
+                # Make download links work: intercept clicks on <a download> tags
+                '  document.addEventListener("click",function(e){'
+                '    var a=e.target.closest("a[href]");'
+                '    if(!a) return;'
+                '    var href=a.getAttribute("href");'
+                '    if(!href) return;'
+                '    var proxied=pw(href);'
+                '    if(proxied!==href){'
+                '      e.preventDefault();'
+                '      var dl=document.createElement("a");'
+                '      dl.href=proxied;'
+                '      dl.download=a.download||"";'
+                '      dl.click();'
+                '    }'
+                '  },true);'
+
+                '})();'
                 '</script>'
             )
 
